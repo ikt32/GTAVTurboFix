@@ -62,7 +62,16 @@ protected:
     int mSoundSetIndex;
 
     irrklang::ISoundEngine* mSoundEngine;
-    std::vector<std::string> mExhaustBones;
+    const std::vector<std::string> mExhaustBones = {
+        "exhaust",    "exhaust_2",  "exhaust_3",  "exhaust_4",
+        "exhaust_5",  "exhaust_6",  "exhaust_7",  "exhaust_8",
+        "exhaust_9",  "exhaust_10", "exhaust_11", "exhaust_12",
+        "exhaust_13", "exhaust_14", "exhaust_15", "exhaust_16",
+        "exhaust_17", "exhaust_18", "exhaust_19", "exhaust_20",
+        "exhaust_21", "exhaust_22", "exhaust_23", "exhaust_24",
+        "exhaust_25", "exhaust_26", "exhaust_27", "exhaust_28",
+        "exhaust_29", "exhaust_30", "exhaust_31", "exhaust_32",
+    };
 
     bool mIsNPC;
 };

@@ -14,6 +14,45 @@
 #include <filesystem>
 #include <algorithm>
 
+#include "Memory/NativeMemory.hpp"
+#include <DirectXMath.h>
+using namespace DirectX; // for XMMATRIX, but whatever 4x4 matrix struct aligned to 16-bytes works too
+
+// Thanks @alexguirre for this! Fixes ptfx positions for tuned exhausts.
+using CVehicle_GetExhaust_t = void(*)(/*CVehicle*/void*, uint32_t exhaustBoneId, XMMATRIX& outTransform, uint32_t& outId);
+static CVehicle_GetExhaust_t CVehicle_GetExhaust = []() {
+    return (CVehicle_GetExhaust_t)(mem::FindPattern("48 8B D9 44 0F 29 48 ? 48 8B 41 20 48 8B 80 ? ? ? ? 48 8B 00") - 0x39);
+}();
+
+
+using CVehicle_GetExtraLight_t = void(*)(/*CVehicle*/void*, uint32_t extralightBoneId, XMMATRIX& outTransform, int32_t& outIndex);
+static CVehicle_GetExtraLight_t CVehicle_GetExtraLight = []() {
+    uintptr_t addr = mem::FindPattern("E8 ? ? ? ? 83 7D 67 FF 0F 84 ? ? ? ? 0F 28 7D CF 0F 28 D7");
+    addr += *(int*)(addr + 1) + 5;
+    return (CVehicle_GetExtraLight_t)addr;
+}();
+
+//void* cvehicle = getVehicleMemoryAddress();
+
+//for (uint32_t extralightBoneId = 124/*extralight_1*/; extralightBoneId <= 127/*extralight_4*/; extralightBoneId++) {
+//    XMMATRIX transform;
+//    int index;
+//    CVehicle_GetExtraLight(cvehicle, extralightBoneId, transform, index);
+//    if (index != -1) {
+//        XMVECTORF32 right, forward, up, pos, rightPos, forwardPos, upPos;
+//        right.v = transform.r[0];
+//        forward.v = transform.r[1];
+//        up.v = transform.r[2];
+//        pos.v = transform.r[3];
+//        rightPos.v = XMVectorAdd(pos, XMVectorScale(right, 0.125f));
+//        forwardPos.v = XMVectorAdd(pos, XMVectorScale(forward, 0.125f));
+//        upPos.v = XMVectorAdd(pos, XMVectorScale(up, 0.125f));
+//        DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], rightPos.f[0], rightPos.f[1], rightPos.f[2], 255, 0, 0, 255);
+//        DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], forwardPos.f[0], forwardPos.f[1], forwardPos.f[2], 0, 255, 0, 255);
+//        DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], upPos.f[0], upPos.f[1], upPos.f[2], 0, 0, 255, 255);
+//    }
+//}
+
 using VExt = VehicleExtensions;
 
 CTurboScript::CTurboScript(
@@ -35,25 +74,6 @@ CTurboScript::CTurboScript(
     mSoundEngine = irrklang::createIrrKlangDevice(irrklang::ESOD_DIRECT_SOUND_8);
     mSoundEngine->setDefault3DSoundMinDistance(7.5f);
     mSoundEngine->setSoundVolume(0.20f);
-
-    mExhaustBones = {
-        "exhaust",
-        "exhaust_2",
-        "exhaust_3",
-        "exhaust_4",
-        "exhaust_5",
-        "exhaust_6",
-        "exhaust_7",
-        "exhaust_8",
-        "exhaust_9",
-        "exhaust_10",
-        "exhaust_11",
-        "exhaust_12",
-        "exhaust_13",
-        "exhaust_14",
-        "exhaust_15",
-        "exhaust_16",
-    };
 }
 
 CTurboScript::~CTurboScript() = default;
@@ -247,7 +267,92 @@ void CTurboScript::updateDial(float newBoost) {
     }
 }
 
+void AnglesFromVectors(Vector3& angles, const float* forward, const float* up) {
+    // Yaw is the bearing of the forward vector's shadow in the xy plane.
+    float yaw = atan2(forward[1], forward[0]);
+
+    // Pitch is the altitude of the forward vector off the xy plane, toward the down direction.
+    float pitch = -asin(forward[2]);
+
+    // Find the vector in the xy plane 90 degrees to the right of our bearing.
+    float planeRightX = sin(yaw);
+    float planeRightY = -cos(yaw);
+
+    // Roll is the rightward lean of our up vector, computed here using a dot product.
+    float roll = asin(up[0] * planeRightX + up[1] * planeRightY);
+    // If we're twisted upside-down, return a roll in the range +-(pi/2, pi)
+    if (up[2] < 0)
+        roll = sgn(roll) * M_PI - roll;
+
+    // Convert radians to degrees.
+    angles.z = yaw;// *180 / M_PI;
+    angles.x = pitch;// *180 / M_PI;
+    angles.y = roll;// *180 / M_PI;
+}
+
 void CTurboScript::runPtfx(Vehicle vehicle, bool loud) {
+
+    for (uint32_t exhaustBoneId = 56/*exhaust*/; exhaustBoneId <= 87/*exhaust_32*/; exhaustBoneId++) {
+        const auto& exhaustBoneName = mExhaustBones[exhaustBoneId - 56];
+        XMMATRIX transform;
+        uint32_t id;
+        CVehicle_GetExhaust(VExt::GetAddress(vehicle), exhaustBoneId, transform, id);
+        if (XMVector3NotEqual(XMVectorZero(), transform.r[0])) // != Vec3(0,0,0)
+        {
+            bool isMod = id >> 24 != 0; // GetExhaust still returns the base exhaust when a mod exhaust is installed, so this can be used to check it
+            if (isMod) {
+                uint32_t exhaustIndex = id >> 24; // == exhaustBoneId - 56
+                uint32_t modBoneIndex = id & 0xFFFFFF; // bone where the mod is attached, == CVehicleModVisible.bone or == CVehicleModLink.bone
+            }
+            else {
+                // Original... Hmm.
+                uint32_t boneIndex = id;
+                //continue;
+            }
+
+            XMVECTORF32 right, forward, up, pos, rightPos, forwardPos, upPos;
+            right.v = transform.r[0];
+            forward.v = transform.r[1];
+            up.v = transform.r[2];
+            pos.v = transform.r[3];
+            rightPos.v = XMVectorAdd(pos, XMVectorScale(right, 0.125f));
+            forwardPos.v = XMVectorAdd(pos, XMVectorScale(forward, 0.125f));
+            upPos.v = XMVectorAdd(pos, XMVectorScale(up, 0.125f));
+            GRAPHICS::DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], rightPos.f[0], rightPos.f[1], rightPos.f[2], 255, 0, 0, 255);
+            GRAPHICS::DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], forwardPos.f[0], forwardPos.f[1], forwardPos.f[2], 0, 255, 0, 255);
+            GRAPHICS::DRAW_LINE(pos.f[0], pos.f[1], pos.f[2], upPos.f[0], upPos.f[1], upPos.f[2], 0, 0, 255, 255);
+
+            Vector3 boneOff = ENTITY::GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(vehicle,
+                pos.f[0], pos.f[1], pos.f[2]);
+
+            //Vector3 boneFwdRel = ENTITY::GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS(vehicle,
+            //    forwardPos.f[0], forwardPos.f[1], forwardPos.f[2]);
+
+            
+            Vector3 boneRotWorld;
+            AnglesFromVectors(boneRotWorld, forward.f, up.f);//Cross(boneFwdRel - boneOff, ENTITY::GET_ENTITY_FORWARD_VECTOR(vehicle));
+
+            auto VehRotDeg = ENTITY::GET_ENTITY_ROTATION(vehicle, 2);
+            auto vehRotRad = Vector3{ deg2rad(VehRotDeg.x), 0, deg2rad(VehRotDeg.y), 0, deg2rad(VehRotDeg.z),0 };
+            Vector3 boneRot = vehRotRad - boneRotWorld;
+
+            float explSz;
+            if (loud) {
+                explSz = 1.25f;
+            }
+            else {
+                explSz = map(VExt::GetCurrentRPM(mVehicle),
+                    mActiveConfig->Turbo.RPMSpoolStart, mActiveConfig->Turbo.RPMSpoolEnd,
+                    0.75f, 1.25f);
+                explSz = std::clamp(explSz, 0.75f, 1.25f);
+            }
+
+            GRAPHICS::USE_PARTICLE_FX_ASSET("core");
+            GRAPHICS::START_PARTICLE_FX_NON_LOOPED_ON_ENTITY("veh_backfire", vehicle,
+                boneOff.x, boneOff.y, boneOff.z, boneRot.x, boneRot.y, boneRot.z, explSz, false, false, false);
+        }
+    }
+    return;
     for (const auto& bone : mExhaustBones) {
         int boneIdx = ENTITY::GET_ENTITY_BONE_INDEX_BY_NAME(vehicle, bone.c_str());
         if (boneIdx == -1)
